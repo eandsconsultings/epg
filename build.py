@@ -5,7 +5,9 @@ Sources, in priority order:
   1. Pluto TV guide (matched by the Pluto code inside each stream link)
   2. IPTV-EPG.org US guide (matched by channel id)
   3. Samsung TV Plus / Plex / Roku guides (matched by channel name)
-  4. Filler blocks for channels with no published schedule
+  4. Cablecast public access stations (their own schedule API)
+  5. Sources in the iptv-org guide index (i.mjh.nz files, listing sites)
+  6. Filler blocks for channels with no published schedule
 
 Usage: python build.py <output-dir>
 """
@@ -20,6 +22,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from xml.sax.saxutils import escape, quoteattr
 
+import sources
+
 PLAYLIST = os.environ.get("PLAYLIST_URL") or (
     "https://freetv.fuckyouthisismywebsite.com/api/playlist.m3u?country=US"
     "&category=animation,auto,business,classic,comedy,cooking,culture,education,"
@@ -30,6 +34,7 @@ PLAYLIST = os.environ.get("PLAYLIST_URL") or (
 MJH = os.environ.get("MJH_BASE", "https://i.mjh.nz/")
 PLUTO = MJH + "PlutoTV/all.xml"
 IPTV_EPG = os.environ.get("IPTV_EPG_URL", "https://iptv-epg.org/files/epg-us.xml.gz")
+GUIDES = os.environ.get("GUIDES_URL", "https://iptv-org.github.io/api/guides.json")
 NAME_FEEDS = [
     "SamsungTVPlus/us.xml",
     "Plex/us.xml",
@@ -243,11 +248,33 @@ def main(outdir):
         except Exception as e:  # noqa: BLE001
             log(feed, "failed:", e)
 
+    # 4. Public access stations on Cablecast
+    try:
+        take(sources.cablecast(chans, guide, WIN_START, WIN_END, fmt_time, log), "cablecast")
+    except Exception as e:  # noqa: BLE001
+        log("cablecast failed:", e)
+
+    # 5. Sources registered in the iptv-org guide index
+    try:
+        rows = sources.guide_rows(chans, guide, GUIDES)
+        for path, m in sources.mjh_files(rows):
+            try:
+                take(scan(MJH + path, lambda cid, nm, m=m: m.get(cid) if m.get(cid) not in guide else None),
+                     "index:" + path)
+            except Exception as e:  # noqa: BLE001
+                log(path, "failed:", e)
+        grabbed = sources.grab(rows, chans, guide, os.environ.get("EPG_DIR"), log)
+        if grabbed:
+            take(scan("file://" + grabbed, lambda cid, nm: cid if cid in ids and cid not in guide else None),
+                 "listing sites")
+    except Exception as e:  # noqa: BLE001
+        log("guide index failed:", e)
+
     real = len(guide)
     if real < 50:
         raise SystemExit("almost no listings found, refusing to publish")
 
-    # 4. Filler
+    # 6. Filler
     for c in chans:
         if c["id"] not in guide:
             guide[c["id"]] = filler(c)
