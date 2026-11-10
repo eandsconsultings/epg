@@ -11,8 +11,19 @@ from datetime import datetime, timedelta, timezone
 from xml.sax.saxutils import escape, quoteattr
 
 UA = {"User-Agent": "Mozilla/5.0 (tv-guide builder)"}
-GRAB_SITES = ["tvpassport.com", "tvguide.com", "mi.tv", "gatotv.com"]
+GRAB_SITES = ["tvpassport.com", "tvguide.com", "mi.tv", "gatotv.com", "watchyour.tv",
+              "distro.tv", "maxstream.tv", "shahid.mbc.net", "sat.tv", "tvprofil.com", "xumo.tv"]
 GRAB_MINUTES = 18
+STOP = {"tv", "channel", "network", "the", "hd", "sd", "fhd", "us", "usa", "live", "by", "on",
+        "and", "television"}
+
+
+def loose(s):
+    """Channel name with filler words removed, for looser matching."""
+    s = s.lower().replace("&amp;", "and").replace("&", " and ")
+    s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
+    s = re.sub(r"['.!]", "", s)
+    return "".join(w for w in re.split(r"[^a-z0-9]+", s) if w and w not in STOP)
 
 
 def get_json(url, timeout=15):
@@ -41,10 +52,16 @@ def cablecast(chans, guide, win_start, win_end, fmt_time, log):
             stations.setdefault(m.group(1), []).append((c["id"], m.group(2)))
     day = timedelta(days=1)
     for slug, wanted in stations.items():
-        base = "https://%s.cablecast.tv/cablecastapi/v1/" % slug
-        try:
-            streams = get_json(base + "livestreams", 10).get("liveStreams") or []
-        except Exception:  # noqa: BLE001
+        streams, base = [], None
+        for host in ("reflect-%s.cablecast.tv" % slug, slug + ".cablecast.tv"):
+            base = "https://%s/cablecastapi/v1/" % host
+            try:
+                streams = get_json(base + "livestreams", 10).get("liveStreams") or []
+            except Exception:  # noqa: BLE001
+                streams = []
+            if streams:
+                break
+        if not streams:
             continue
         for cid, seg in wanted:
             chan = None
