@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from xml.sax.saxutils import escape, quoteattr
 
 UA = {"User-Agent": "Mozilla/5.0 (tv-guide builder)"}
-GRAB_SITES = ["tvtv.us", "tvpassport.com", "tvguide.com", "mi.tv", "gatotv.com"]
+GRAB_SITES = ["tvpassport.com", "tvguide.com", "mi.tv", "gatotv.com"]
 GRAB_MINUTES = 18
 
 
