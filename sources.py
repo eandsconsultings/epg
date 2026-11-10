@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from xml.sax.saxutils import escape, quoteattr
 
@@ -14,6 +15,8 @@ UA = {"User-Agent": "Mozilla/5.0 (tv-guide builder)"}
 GRAB_SITES = ["tvpassport.com", "tvguide.com", "mi.tv", "gatotv.com", "watchyour.tv",
               "distro.tv", "maxstream.tv", "shahid.mbc.net", "sat.tv", "tvprofil.com", "xumo.tv"]
 GRAB_MINUTES = 18
+CC_URLS = {}    # channel id -> current stream address, when it moved
+CC_STATE = {}   # channel id -> [station, station channel number]
 STOP = {"tv", "channel", "network", "the", "hd", "sd", "fhd", "us", "usa", "live", "by", "on",
         "and", "television"}
 
@@ -35,12 +38,50 @@ def get_json(url, timeout=15):
         return json.load(r)
 
 
+def load_state(repo):
+    """What the last build learned about each public access channel."""
+    if not repo:
+        return {}
+    try:
+        return get_json("https://raw.githubusercontent.com/%s/dist/state.json" % repo, 20)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_state(path):
+    with open(path, "w") as f:
+        json.dump(CC_STATE, f, sort_keys=True)
+
+
+def alive(url):
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200 and b"#EXT" in r.read(2000)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def repair(alts, log):
+    """alts: {channel id: (current link, self-updating link)}. Swaps a link
+    only when the current one is dead and the other one answers."""
+    def check(item):
+        cid, (cur, alt) = item
+        if alive(cur) or not alive(alt):
+            return None
+        return cid, alt
+    with ThreadPoolExecutor(16) as pool:
+        fixed = dict(r for r in pool.map(check, alts.items()) if r)
+    log("link check: %d channels have a self-updating link, %d swapped in" % (len(alts), len(fixed)))
+    return fixed
+
+
 def prog(cid, start, stop, title, fmt_time):
     return (start, "<programme start=%s stop=%s channel=%s><title>%s</title></programme>"
             % (quoteattr(fmt_time(start)), quoteattr(fmt_time(stop)), quoteattr(cid), escape(title)))
 
 
-def cablecast(chans, guide, win_start, win_end, fmt_time, log):
+def cablecast(chans, guide, win_start, win_end, fmt_time, log, state=None):
     """Stations on Cablecast publish their schedule through a standard API.
     The playlist stream path (/live-N/) tells us which station channel it is."""
     found, stations = {}, {}
@@ -49,7 +90,7 @@ def cablecast(chans, guide, win_start, win_end, fmt_time, log):
             continue
         m = re.search(r"//reflect-([^./]+)\.cablecast\.tv(/live-\d+/)", c.get("url", ""))
         if m:
-            stations.setdefault(m.group(1), []).append((c["id"], m.group(2)))
+            stations.setdefault(m.group(1), []).append((c["id"], m.group(2), c["url"]))
     day = timedelta(days=1)
     for slug, wanted in stations.items():
         streams, base = [], None
@@ -63,13 +104,23 @@ def cablecast(chans, guide, win_start, win_end, fmt_time, log):
                 break
         if not streams:
             continue
-        for cid, seg in wanted:
+        for cid, seg, url in wanted:
             chan = None
             for s in streams:
                 if seg in (s.get("streamUrl") or s.get("url") or ""):
                     chan = s.get("channel")
             if chan is None:
+                # The stream moved. Find it again by the station channel number we saved.
+                old = (state or {}).get(cid)
+                if old and old[0] == slug:
+                    for s in streams:
+                        m = re.search(r"/live-\d+/", s.get("streamUrl") or s.get("url") or "")
+                        if s.get("channel") == old[1] and m:
+                            chan = old[1]
+                            CC_URLS[cid] = re.sub(r"/live-\d+/", m.group(0), url, count=1)
+            if chan is None:
                 continue
+            CC_STATE[cid] = [slug, chan]
             try:
                 data = get_json(
                     "%sscheduleitems?channel=%s&start=%s&end=%s&include=show&page_size=1000"
