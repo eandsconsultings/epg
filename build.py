@@ -146,6 +146,7 @@ def scan(url, want):
     playlist id to file a channel under, or None to skip it.
     Returns {playlist_id: [programme xml, ...]}."""
     out, mapping, names = {}, {}, {}
+    scan.back = {}
     src = open_url(url)
     ctx = ET.iterparse(src, events=("start", "end"))
     _, root = next(ctx)
@@ -161,6 +162,7 @@ def scan(url, want):
                 mapping[cid] = want(cid, names.get(cid, ""))
             target = mapping[cid]
             if target:
+                scan.back[target] = cid
                 start, stop = parse_time(el.get("start")), parse_time(el.get("stop"))
                 if start and stop and stop > WIN_START and start < WIN_END:
                     el.set("channel", target)
@@ -198,14 +200,17 @@ def main(outdir):
     if len(chans) < 100:
         raise SystemExit("playlist looks broken, refusing to publish")
 
-    guide, source, report = {}, {}, []
+    guide, source, srcid, report = {}, {}, {}, []
 
     def take(found, label):
+        back, scan.back = getattr(scan, "back", {}), {}
         n = 0
         for cid, progs in found.items():
             if cid not in guide and progs:
                 guide[cid] = progs
                 source[cid] = label
+                if back.get(cid):
+                    srcid[cid] = back[cid]
                 n += 1
         report.append("%-28s %d" % (label, n))
         log(label, "->", n)
@@ -277,7 +282,8 @@ def main(outdir):
 
     # 4. Public access stations on Cablecast
     try:
-        take(sources.cablecast(chans, guide, WIN_START, WIN_END, fmt_time, log), "cablecast")
+        state = sources.load_state(os.environ.get("GITHUB_REPOSITORY"))
+        take(sources.cablecast(chans, guide, WIN_START, WIN_END, fmt_time, log, state), "cablecast")
     except Exception as e:  # noqa: BLE001
         log("cablecast failed:", e)
 
@@ -305,11 +311,39 @@ def main(outdir):
     head = "#EXTM3U"
     if os.environ.get("GITHUB_REPOSITORY"):
         head += ' x-tvg-url="https://raw.githubusercontent.com/%s/dist/guide.xml.gz"' % os.environ["GITHUB_REPOSITORY"]
-    with open(os.path.join(outdir, "playlist.m3u"), "w", encoding="utf-8") as f:
+
+    # Full playlist with self-repairing links. Channels served from a bare
+    # numeric address (anonymous re-broadcasts) are left out.
+    fixes = dict(sources.CC_URLS)
+    alts = {}
+    for c in chans:
+        sid, label = srcid.get(c["id"]), source.get(c["id"], "")
+        if sid and "Plex/" in label:
+            alts[c["id"]] = (c["url"], "https://jmp2.uk/plex-%s.m3u8" % sid)
+        elif sid and "PlutoTV/" in label and "jmp2.uk/plu-" not in c["url"]:
+            alts[c["id"]] = (c["url"], "https://jmp2.uk/plu-%s.m3u8" % sid)
+    try:
+        fixes.update(sources.repair(alts, log))
+    except Exception as e:  # noqa: BLE001
+        log("repair check failed:", e)
+    kept = left_out = 0
+    with open(os.path.join(outdir, "full.m3u"), "w", encoding="utf-8") as f, \
+            open(os.path.join(outdir, "playlist.m3u"), "w", encoding="utf-8") as trimmed:
         f.write(head + "\n")
+        trimmed.write(head + "\n")
         for c in chans:
+            if re.match(r"https?://\d+\.\d+\.\d+\.\d+[:/]", c["url"]):
+                left_out += 1
+                continue
+            entry = c["extinf"] + "\n" + fixes.get(c["id"], c["url"]) + "\n"
+            f.write(entry)
             if c["id"] in guide:
-                f.write(c["extinf"] + "\n" + c["url"] + "\n")
+                trimmed.write(entry)
+            kept += 1
+    sources.save_state(os.path.join(outdir, "state.json"))
+    names = {c["id"]: c["name"] for c in chans}
+    repairs = ["repaired\t%s\t%s" % (cid, names.get(cid, "")) for cid in sorted(fixes)]
+    log("full playlist: %d channels, %d left out, %d links repaired" % (kept, left_out, len(repairs)))
 
     # 6. Filler
     for c in chans:
@@ -337,7 +371,11 @@ def main(outdir):
         f.write("built %s UTC\n" % NOW.strftime("%Y-%m-%d %H:%M"))
         f.write("channels %d, real listings %d, filler %d, programmes %d\n\n"
                 % (len(chans), real, len(chans) - real, total))
-        f.write("\n".join(report) + "\n\n")
+        f.write("\n".join(report) + "\n")
+        f.write("full playlist: %d channels, %d left out (anonymous servers), %d links repaired\n\n"
+                % (kept, left_out, len(repairs)))
+        if repairs:
+            f.write("\n".join(repairs) + "\n\n")
         for c in chans:
             f.write("%s\t%s\t%s\n" % (source[c["id"]], c["id"], c["name"]))
     log("real listings: %d of %d, programmes: %d, size: %.1f MB"
