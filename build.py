@@ -131,6 +131,7 @@ def load_playlist():
                 "name": g("tvg-name") or line.rsplit(",", 1)[-1],
                 "group": g("group-title"),
                 "logo": g("tvg-logo"),
+                "extinf": line,
             }
         elif line and not line.startswith("#") and cur:
             cur["url"] = line
@@ -248,6 +249,32 @@ def main(outdir):
         except Exception as e:  # noqa: BLE001
             log(feed, "failed:", e)
 
+    # 3b. The same guides again with looser name matching (ignores TV, Channel, Network...)
+    for feed in [MJH + f for f in NAME_FEEDS] + [IPTV_EPG]:
+        by_name, dup = {}, set()
+        for c in chans:
+            if c["id"] not in guide:
+                k = sources.loose(c["name"])
+                if len(k) >= 5:
+                    if k in by_name:
+                        dup.add(k)
+                    by_name[k] = c["id"]
+        for k in dup:
+            del by_name[k]
+        claimed = set()
+
+        def want_loose(cid, nm, by_name=by_name, claimed=claimed):
+            t = by_name.get(sources.loose(nm))
+            if t and t not in claimed:
+                claimed.add(t)
+                return t
+            return None
+
+        try:
+            take(scan(feed, want_loose), "loose:" + "/".join(feed.split("/")[-2:]))
+        except Exception as e:  # noqa: BLE001
+            log(feed, "failed:", e)
+
     # 4. Public access stations on Cablecast
     try:
         take(sources.cablecast(chans, guide, WIN_START, WIN_END, fmt_time, log), "cablecast")
@@ -273,6 +300,16 @@ def main(outdir):
     real = len(guide)
     if real < 50:
         raise SystemExit("almost no listings found, refusing to publish")
+
+    # Trimmed playlist: only the channels that have real listings
+    head = "#EXTM3U"
+    if os.environ.get("GITHUB_REPOSITORY"):
+        head += ' x-tvg-url="https://raw.githubusercontent.com/%s/dist/guide.xml.gz"' % os.environ["GITHUB_REPOSITORY"]
+    with open(os.path.join(outdir, "playlist.m3u"), "w", encoding="utf-8") as f:
+        f.write(head + "\n")
+        for c in chans:
+            if c["id"] in guide:
+                f.write(c["extinf"] + "\n" + c["url"] + "\n")
 
     # 6. Filler
     for c in chans:
