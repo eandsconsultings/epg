@@ -10,13 +10,25 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install listing grabber
+        continue-on-error: true
+        run: |
+          git clone --depth 1 -b master https://github.com/iptv-org/epg.git "$RUNNER_TEMP/epg"
+          cd "$RUNNER_TEMP/epg" && npm install --no-audit --no-fund
       - run: python build.py out
+        env:
+          EPG_DIR: ${{ runner.temp }}/epg
       - name: Publish
         run: |
           cd out
